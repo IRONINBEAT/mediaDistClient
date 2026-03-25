@@ -7,7 +7,7 @@ from pathlib import Path
 import requests
 
 # ====================== НАСТРОЙКИ ======================
-DOWNLOAD_DIR = Path("media")
+DOWNLOAD_DIR = Path("media").resolve()          # абсолютный путь!
 CONFIG_FILE = Path("config.json")
 PLAYLIST_FILE = DOWNLOAD_DIR / "playlist.m3u"
 # ======================================================
@@ -16,28 +16,28 @@ class MediaClient:
     def __init__(self):
         self.config = self._load_config()
         self.current_playlist = []
-        self.local_files = {}
+        self.local_files = {}                   # file_id -> абсолютный путь
         self.device_status = "unknown"
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.mpv_process = None
 
         DOWNLOAD_DIR.mkdir(exist_ok=True)
-        self._start_mpv()                      # сразу пытаемся запустить плеер
+        self._start_mpv()
 
     def _load_config(self):
         if CONFIG_FILE.exists():
             with open(CONFIG_FILE, encoding="utf-8") as f:
                 return json.load(f)
         
-        default_config = {
+        default = {
             "server_url": "http://217.71.129.139:5909",
-            "device_id": "ВАШ_DEVICE_ID",
-            "token": "ВАШ_ТОКЕН",
+            "device_id": "ТВОЙ_DEVICE_ID",
+            "token": "ТВОЙ_ТОКЕН",
             "heartbeat_interval": 30,
             "check_videos_interval": 60
         }
-        self._save_config(default_config)
+        self._save_config(default)
         print("✅ Создан config.json — заполни device_id и token")
         exit(0)
 
@@ -54,59 +54,41 @@ class MediaClient:
             r.raise_for_status()
             return r.json()
         except Exception as e:
-            print(f"❌ API ошибка {endpoint}: {e}")
+            print(f"❌ API {endpoint}: {e}")
             return None
 
-    # ====================== ЗАПУСК MPV ======================
+    # ====================== MPV ======================
     def _start_mpv(self):
-        """Запускаем mpv с выводом ошибок в консоль"""
         if self.mpv_process and self.mpv_process.poll() is None:
             return
 
-        # Флаги, хорошо работающие на Orange Pi / ARM
         cmd = [
             "mpv",
             "--fullscreen",
-            "--no-terminal",           # убираем терминал mpv
+            "--no-terminal",
             "--loop-playlist=inf",
             f"--playlist={PLAYLIST_FILE}",
             "--osc=no",
             "--no-border",
             "--keep-open=always",
-            "--vo=gpu",                # или "xv" если gpu не работает
-            "--hwdec=auto",            # аппаратное декодирование
+            "--vo=gpu",           # попробуй потом --vo=xv или --vo=drm если не запустится
+            "--hwdec=auto",
             "--really-quiet",
-            "--log-file=mpv.log"       # логируем ошибки mpv
+            "--log-file=mpv.log"
         ]
 
         print("🚀 Запускаем mpv...")
         try:
-            self.mpv_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                universal_newlines=True
-            )
+            self.mpv_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             time.sleep(1.5)
-
-            # Проверяем, жив ли процесс
             if self.mpv_process.poll() is None:
-                print("✅ mpv успешно запущен (окно должно появиться)")
+                print("✅ mpv запущен")
             else:
-                print("❌ mpv упал сразу после запуска. Проверь mpv.log")
-                # Выводим последние строки лога
-                if Path("mpv.log").exists():
-                    print("Последние строки mpv.log:")
-                    with open("mpv.log", "r") as f:
-                        print("".join(f.readlines()[-10:]))
-
-        except FileNotFoundError:
-            print("❌ Ошибка: mpv не найден. Установи: sudo apt install mpv")
+                print("❌ mpv упал. Смотри mpv.log")
         except Exception as e:
             print(f"❌ Ошибка запуска mpv: {e}")
 
     def _rebuild_playlist(self):
-        """Создаём M3U плейлист"""
         print(f"🔄 Создаём плейлист ({len(self.current_playlist)} файлов)")
 
         with open(PLAYLIST_FILE, "w", encoding="utf-8") as f:
@@ -125,18 +107,18 @@ class MediaClient:
                 else:
                     f.write(f"#EXTINF:-1,{fid}\n")
 
-                f.write(str(path) + "\n")
+                f.write(f"{path}\n")          # теперь абсолютный путь!
 
     def _rebuild_and_restart_mpv(self):
         self._rebuild_playlist()
-        self._start_mpv()               # перезапускаем mpv с новым плейлистом
+        self._start_mpv()
 
     # ====================== HEARTBEAT & CHECK ======================
     def heartbeat(self):
         data = {"token": self.config["token"], "id": self.config["device_id"]}
         resp = self._api_post("/api/heartbeat", data)
-        if resp and resp.get("status") is not None:
-            status = resp.get("status")
+        if resp and "status" in resp:
+            status = resp["status"]
             with self.lock:
                 self.device_status = {200: "active", 401: "unverified", 403: "blocked"}.get(status, "unknown")
             print(f"❤️ Heartbeat → {status} ({self.device_status})")
@@ -163,7 +145,6 @@ class MediaClient:
     def _update_playlist(self, videos_data):
         new_ids = {v["id"] for v in videos_data}
 
-        # Удаляем лишние файлы
         with self.lock:
             for fid in list(self.local_files.keys()):
                 if fid not in new_ids:
@@ -171,7 +152,6 @@ class MediaClient:
                     if p and Path(p).exists():
                         Path(p).unlink()
 
-        # Скачиваем новые
         for item in videos_data:
             fid = item["id"]
             if fid in self.local_files and Path(self.local_files[fid]).exists():
@@ -181,7 +161,7 @@ class MediaClient:
                 with self.lock:
                     self.local_files[fid] = local_path
             except Exception as e:
-                print(f"❌ Скачивание {fid} не удалось: {e}")
+                print(f"❌ Скачивание {fid} ошибка: {e}")
 
         with self.lock:
             self.current_playlist = videos_data[:]
@@ -202,20 +182,19 @@ class MediaClient:
 
         if file_type == "pdf":
             self._render_pdf_pages(str(local_path), file_id)
-        return str(local_path)
+
+        return str(local_path)                     # возвращаем абсолютный путь
 
     def _render_pdf_pages(self, pdf_path, file_id):
-        # ... (оставляем как было)
-        pass   # можешь оставить старую реализацию
+        # оставляем как было раньше (или можешь отключить пока)
+        pass
 
     def run(self):
-        print("🚀 Запуск клиента...")
+        print("🚀 Запуск клиента (исправленные пути)...")
         self.heartbeat()
 
-        hb = threading.Thread(target=self._heartbeat_loop, daemon=True)
-        cv = threading.Thread(target=self._check_videos_loop, daemon=True)
-        hb.start()
-        cv.start()
+        threading.Thread(target=self._heartbeat_loop, daemon=True).start()
+        threading.Thread(target=self._check_videos_loop, daemon=True).start()
 
         try:
             while not self.stop_event.is_set():

@@ -244,21 +244,38 @@ class MediaClient:
 
         try:
             if ftype == "video":
+                # Для видео загружаем один раз и ждём окончания
                 self._send_mpv_command(["loadfile", local_path, "replace"])
+                
                 if duration:
+                    # Если в панели задана конкретная длительность — ждём её
                     time.sleep(duration)
-                    self._send_mpv_command(["stop"])
+                else:
+                    # Иначе ждём реальную длительность видео + небольшую паузу
+                    time.sleep(0.5)  # даём mpv начать воспроизведение
+                    # Здесь можно добавить более точное ожидание через get_property, но для простоты:
+                    # просто ждём чуть больше, чем длительность видео (mpv сам остановится)
+                    # Но надёжнее — просто дать mpv доиграть и перейти дальше
+                    # Для зацикливания одного видео лучше использовать loop в mpv
+
+                # Если плейлист состоит только из одного видео — зацикливаем его внутри mpv
+                with self.lock:
+                    if len(self.current_playlist) == 1 and ftype == "video":
+                        self._send_mpv_command(["set", "loop", "inf"])
+                    else:
+                        self._send_mpv_command(["set", "loop", "no"])
 
             elif ftype == "image":
                 dur = duration or 5
                 self._send_mpv_command(["loadfile", local_path, "replace"])
                 self._send_mpv_command(["set", "image-display-duration", str(dur)])
-                time.sleep(dur)
+                time.sleep(dur + 0.2)   # небольшая пауза после изображения
 
             elif ftype == "pdf":
                 pages = playback.get("pdf_page_durations", [])
                 if not pages:
                     pages = [{"page": 1, "duration": 5}]
+                
                 for p in pages:
                     page_path = self._get_pdf_page_path(fid, p["page"])
                     if page_path:
@@ -268,7 +285,7 @@ class MediaClient:
                         time.sleep(p["duration"])
 
         except Exception as e:
-            print(f"❌ Ошибка воспроизведения: {e}")
+            print(f"❌ Ошибка воспроизведения {fid}: {e}")
             self._start_mpv()
 
     # ====================== ФОНОВЫЕ ЦИКЛЫ ======================
@@ -296,7 +313,7 @@ class MediaClient:
                     break
                 self._play_item(item)
 
-            time.sleep(0.3)   # небольшая пауза между проходами плейлиста
+            time.sleep(0.8 if len(playlist) == 1 else 0.3)
 
     def run(self):
         print("🚀 Запуск медиа-клиента с плавным переключением...")

@@ -76,7 +76,9 @@ class MediaClient:
             "--osc=no",
             "--no-border",
             "--keep-open=always",
-            "--really-quiet"
+            "--really-quiet",
+            "--reset-on-next-file=all",     # ← важно: сбрасывает все настройки при новом файле
+            "--vo=gpu"                      # или --vo=gpu-drm на Orange Pi
         ]
 
         self.mpv_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -244,18 +246,32 @@ class MediaClient:
 
         try:
             if ftype == "video":
+                # Полностью останавливаем предыдущее воспроизведение
+                self._send_mpv_command(["stop"])
+                time.sleep(0.15)                    # важная пауза для сброса состояния
+
                 self._send_mpv_command(["loadfile", local_path, "replace"])
+
+                # Ждём ровно заданную длительность (или длину видео)
                 if duration:
                     time.sleep(duration)
-                    self._send_mpv_command(["stop"])
+                else:
+                    # Если длительность не задана — ждём ~длину видео + запас
+                    time.sleep(30)                  # можно увеличить, если видео длинные
+
+                self._send_mpv_command(["stop"])    # гарантированно останавливаем
 
             elif ftype == "image":
                 dur = duration or 5
+                self._send_mpv_command(["stop"])
+                time.sleep(0.1)
                 self._send_mpv_command(["loadfile", local_path, "replace"])
                 self._send_mpv_command(["set", "image-display-duration", str(dur)])
                 time.sleep(dur)
 
             elif ftype == "pdf":
+                self._send_mpv_command(["stop"])
+                time.sleep(0.1)
                 pages = playback.get("pdf_page_durations", [])
                 if not pages:
                     pages = [{"page": 1, "duration": 5}]
@@ -268,8 +284,8 @@ class MediaClient:
                         time.sleep(p["duration"])
 
         except Exception as e:
-            print(f"❌ Ошибка воспроизведения: {e}")
-            self._start_mpv()
+            print(f"❌ Ошибка воспроизведения {fid}: {e}")
+            self._start_mpv()   # перезапускаем mpv при критической ошибке
 
     # ====================== ФОНОВЫЕ ЦИКЛЫ ======================
     def _heartbeat_loop(self):

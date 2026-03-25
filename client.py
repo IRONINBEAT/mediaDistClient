@@ -5,24 +5,28 @@ import threading
 import subprocess
 from pathlib import Path
 import requests
-from typing import Dict, List, Any
+import socket
 
 # ====================== НАСТРОЙКИ ======================
 DOWNLOAD_DIR = Path("media")
 CONFIG_FILE = Path("config.json")
+MPV_SOCKET = "/tmp/mpv_socket"
 # ======================================================
 
 class MediaClient:
     def __init__(self):
         self.config = self._load_config()
-        self.current_playlist: List[Dict] = []
-        self.local_files: Dict[str, str] = {}          # file_id -> полный путь
+        self.current_playlist = []
+        self.local_files = {}          # file_id -> полный путь к файлу
         self.device_status = "unknown"
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
-        DOWNLOAD_DIR.mkdir(exist_ok=True)
+        self.mpv_process = None
 
-    def _load_config(self) -> dict:
+        DOWNLOAD_DIR.mkdir(exist_ok=True)
+        self._start_mpv()              # запускаем mpv один раз
+
+    def _load_config(self):
         if CONFIG_FILE.exists():
             with open(CONFIG_FILE, encoding="utf-8") as f:
                 return json.load(f)
@@ -30,13 +34,13 @@ class MediaClient:
         # Первый запуск — создаём шаблон
         default_config = {
             "server_url": "http://217.71.129.139:5909",
-            "device_id": "NSTU_OrangePI2302",          # ← ИЗМЕНИ НА СВОЙ
-            "token": "ВАШ_ТОКЕН_ИЗ_ВЕБ_ПАНЕЛИ",       # ← ОБЯЗАТЕЛЬНО ЗАМЕНИ!
+            "device_id": "NSTU_OrangePI2302",          # ← ИЗМЕНИ
+            "token": "ВАШ_ТОКЕН_ИЗ_ПАНЕЛИ",            # ← ОБЯЗАТЕЛЬНО ЗАМЕНИ
             "heartbeat_interval": 30,
             "check_videos_interval": 60
         }
         self._save_config(default_config)
-        print("✅ Создан config.json. Открой его, заполни token и device_id, затем перезапусти скрипт.")
+        print("✅ Создан config.json. Заполни device_id и token, затем перезапусти.")
         exit(0)
 
     def _save_config(self, cfg=None):
@@ -45,7 +49,7 @@ class MediaClient:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
 
-    def _api_post(self, endpoint: str, payload: dict):
+    def _api_post(self, endpoint, payload):
         url = f"{self.config['server_url']}{endpoint}"
         try:
             r = requests.post(url, json=payload, timeout=15)
@@ -55,13 +59,47 @@ class MediaClient:
             print(f"❌ API {endpoint} ошибка: {e}")
             return None
 
+    # ====================== MPV В ФОНОВОМ РЕЖИМЕ (IPC) ======================
+    def _start_mpv(self):
+        """Запускаем mpv один раз с IPC-сокетом"""
+        if self.mpv_process and self.mpv_process.poll() is None:
+            return
+
+        cmd = [
+            "mpv",
+            "--fullscreen",
+            "--no-terminal",
+            "--idle=yes",
+            "--loop-playlist=no",
+            f"--input-ipc-server={MPV_SOCKET}",
+            "--force-window=yes",
+            "--osc=no",
+            "--no-border",
+            "--keep-open=always",
+            "--really-quiet"
+        ]
+
+        self.mpv_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1.0)  # даём mpv полностью запуститься
+        print("🎥 mpv запущен в фоновом режиме (IPC)")
+
+    def _send_mpv_command(self, command):
+        """Отправка команды через сокет"""
+        if not Path(MPV_SOCKET).exists():
+            self._start_mpv()
+
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(MPV_SOCKET)
+            sock.send((json.dumps({"command": command}) + "\n").encode())
+            sock.close()
+        except Exception:
+            self._start_mpv()
+
     # ====================== СИНХРОНИЗАЦИЯ ТОКЕНА ======================
-    def _try_sync_token(self) -> bool:
-        print("🔄 Пробуем синхронизировать токен (sync-token)...")
-        data = {
-            "token": self.config["token"],
-            "id": self.config["device_id"]
-        }
+    def _try_sync_token(self):
+        print("🔄 Пробуем синхронизировать токен...")
+        data = {"token": self.config["token"], "id": self.config["device_id"]}
         resp = self._api_post("/api/sync-token", data)
         if not resp:
             return False
@@ -71,14 +109,9 @@ class MediaClient:
             if new_token:
                 self.config["token"] = new_token
                 self._save_config()
-                print(f"✅ Токен обновлён → {new_token[:30]}...")
+                print(f"✅ Токен обновлён")
                 return True
-        elif resp.get("success") and resp.get("status") == "actual":
-            print("✅ Токен уже актуален")
-            return True
-        else:
-            print(f"⚠️ sync-token: {resp.get('message', 'неизвестная ошибка')}")
-            return False
+        return True
 
     # ====================== HEARTBEAT ======================
     def heartbeat(self):
@@ -90,13 +123,8 @@ class MediaClient:
 
         status_code = resp.get("status")
         with self.lock:
-            self.device_status = {
-                200: "active",
-                401: "unverified",
-                403: "blocked"
-            }.get(status_code, "unknown")
-
-        print(f"❤️ Heartbeat → status={status_code} ({self.device_status})")
+            self.device_status = {200: "active", 401: "unverified", 403: "blocked"}.get(status_code, "unknown")
+        print(f"❤️ Heartbeat → {status_code} ({self.device_status})")
 
     # ====================== CHECK-VIDEOS ======================
     def check_videos(self):
@@ -110,49 +138,43 @@ class MediaClient:
         }
         resp = self._api_post("/api/check-videos", data)
         if not resp or not resp.get("answer"):
-            if resp and resp.get("status") in (403,):
+            if resp and resp.get("status") == 403:
                 self._try_sync_token()
             return
 
         if resp.get("status") == 204:
-            print("📦 Контент актуален (204 No Content)")
+            print("📦 Контент актуален")
             return
 
         if resp.get("status") == 205:
-            print("🔄 Обновляем контент (205 Reset Content)")
+            print("🔄 Обновляем плейлист...")
             self._update_playlist(resp.get("videos", []))
-        else:
-            print(f"⚠️ Неизвестный статус: {resp.get('status')}")
 
-    def _update_playlist(self, videos_data: List[dict]):
+    def _update_playlist(self, videos_data):
         new_ids = {v["id"] for v in videos_data}
 
-        # Удаляем файлы, которых больше нет в плейлисте
+        # Удаляем ненужные файлы
         with self.lock:
             for fid in list(self.local_files.keys()):
                 if fid not in new_ids:
                     path = self.local_files.pop(fid, None)
                     if path and Path(path).exists():
                         Path(path).unlink()
-                    # удаляем папку с страницами PDF
                     pages_dir = DOWNLOAD_DIR / f"{fid}_pages"
                     if pages_dir.exists():
                         for f in pages_dir.glob("*"):
                             f.unlink()
                         pages_dir.rmdir()
 
-        # Скачиваем новые файлы
+        # Скачиваем новые
         for item in videos_data:
             fid = item["id"]
             if fid in self.local_files and Path(self.local_files[fid]).exists():
                 continue
 
-            url = item["url"]
-            ftype = item["file_type"]
-            print(f"⬇️ Скачиваем {fid} ({ftype})")
-
+            print(f"⬇️ Скачиваем {fid} ({item['file_type']})")
             try:
-                local_path = self._download_file(url, fid, ftype)
+                local_path = self._download_file(item["url"], fid, item["file_type"])
                 with self.lock:
                     self.local_files[fid] = local_path
             except Exception as e:
@@ -160,9 +182,9 @@ class MediaClient:
 
         with self.lock:
             self.current_playlist = videos_data[:]
-        print(f"✅ Плейлист обновлён: {len(videos_data)} файлов")
+        print(f"✅ Плейлист обновлён ({len(videos_data)} файлов)")
 
-    def _download_file(self, url: str, file_id: str, file_type: str) -> str:
+    def _download_file(self, url, file_id, file_type):
         basename = os.path.basename(url)
         local_path = DOWNLOAD_DIR / f"{file_id}_{basename}"
 
@@ -180,7 +202,7 @@ class MediaClient:
 
         return str(local_path)
 
-    def _render_pdf_pages(self, pdf_path: str, file_id: str):
+    def _render_pdf_pages(self, pdf_path, file_id):
         pages_dir = DOWNLOAD_DIR / f"{file_id}_pages"
         pages_dir.mkdir(exist_ok=True, parents=True)
         for old in pages_dir.glob("*.png"):
@@ -188,16 +210,25 @@ class MediaClient:
 
         prefix = str(pages_dir / "page")
         try:
-            subprocess.run(["pdftoppm", "-png", pdf_path, prefix], 
-                          check=True, capture_output=True)
+            subprocess.run(["pdftoppm", "-png", pdf_path, prefix], check=True, capture_output=True)
             print(f"📄 PDF {file_id} → страницы извлечены")
-        except FileNotFoundError:
-            print("⚠️ pdftoppm не найден (установи poppler-utils)")
         except Exception as e:
-            print(f"❌ Ошибка рендеринга PDF: {e}")
+            print(f"⚠️ Ошибка рендеринга PDF: {e}")
 
-    # ====================== ВОСПРОИЗВЕДЕНИЕ ======================
-    def _play_item(self, item: dict):
+    # ====================== ПЛАВНОЕ ВОСПРОИЗВЕДЕНИЕ ======================
+    def _get_pdf_page_path(self, file_id, page_num):
+        pages_dir = DOWNLOAD_DIR / f"{file_id}_pages"
+        if not pages_dir.exists():
+            return None
+        
+        pngs = sorted(
+            pages_dir.glob("*.png"),
+            key=lambda p: int(''.join(filter(str.isdigit, p.stem.split('-')[-1])) or 0)
+        )
+        idx = page_num - 1
+        return str(pngs[idx]) if 0 <= idx < len(pngs) else None
+
+    def _play_item(self, item):
         fid = item["id"]
         local_path = self.local_files.get(fid)
         if not local_path or not Path(local_path).exists():
@@ -209,19 +240,20 @@ class MediaClient:
         playback = item.get("playback", {})
         duration = playback.get("duration_seconds")
 
+        print(f"▶️  Воспроизводим: {fid} ({ftype})")
+
         try:
             if ftype == "video":
-                cmd = ["mpv", "--fullscreen", "--no-terminal", "--loop=no"]
+                self._send_mpv_command(["loadfile", local_path, "replace"])
                 if duration:
-                    cmd += [f"--length={duration}"]
-                cmd.append(local_path)
-                subprocess.run(cmd)
+                    time.sleep(duration)
+                    self._send_mpv_command(["stop"])
 
             elif ftype == "image":
                 dur = duration or 5
-                cmd = ["mpv", "--fullscreen", "--no-terminal",
-                       f"--image-display-duration={dur}", "--loop=no", local_path]
-                subprocess.run(cmd)
+                self._send_mpv_command(["loadfile", local_path, "replace"])
+                self._send_mpv_command(["set", "image-display-duration", str(dur)])
+                time.sleep(dur)
 
             elif ftype == "pdf":
                 pages = playback.get("pdf_page_durations", [])
@@ -230,30 +262,14 @@ class MediaClient:
                 for p in pages:
                     page_path = self._get_pdf_page_path(fid, p["page"])
                     if page_path:
-                        cmd = ["mpv", "--fullscreen", "--no-terminal",
-                               f"--image-display-duration={p['duration']}", "--loop=no", page_path]
-                        subprocess.run(cmd)
+                        self._send_mpv_command(["loadfile", page_path, "replace"])
+                        time.sleep(p["duration"])
                     else:
                         time.sleep(p["duration"])
 
         except Exception as e:
-            print(f"❌ Ошибка воспроизведения {ftype} {fid}: {e}")
-
-    def _get_pdf_page_path(self, file_id: str, page_num: int):
-        """Возвращает путь к странице PDF или None"""
-        pages_dir = DOWNLOAD_DIR / f"{file_id}_pages"
-        if not pages_dir.exists():
-            return None
-        
-        pngs = sorted(
-            pages_dir.glob("*.png"),
-            key=lambda p: int(''.join(filter(str.isdigit, p.stem.split('-')[-1])) or 0)
-        )
-        
-        idx = page_num - 1
-        if 0 <= idx < len(pngs):
-            return str(pngs[idx])
-        return None
+            print(f"❌ Ошибка воспроизведения: {e}")
+            self._start_mpv()
 
     # ====================== ФОНОВЫЕ ЦИКЛЫ ======================
     def _heartbeat_loop(self):
@@ -280,10 +296,10 @@ class MediaClient:
                     break
                 self._play_item(item)
 
-            time.sleep(0.5)
+            time.sleep(0.3)   # небольшая пауза между проходами плейлиста
 
     def run(self):
-        print("🚀 Запуск медиа-клиента...")
+        print("🚀 Запуск медиа-клиента с плавным переключением...")
         self.heartbeat()
         self.check_videos()
 
@@ -299,6 +315,8 @@ class MediaClient:
             print("\n🛑 Завершение по Ctrl+C")
         finally:
             self.stop_event.set()
+            if self.mpv_process:
+                self.mpv_process.terminate()
 
 
 if __name__ == "__main__":

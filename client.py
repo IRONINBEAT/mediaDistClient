@@ -77,8 +77,9 @@ class MediaClient:
             "--no-border",
             "--keep-open=always",
             "--really-quiet",
-            "--reset-on-next-file=all",     # ← важно: сбрасывает все настройки при новом файле
-            "--vo=gpu"                      # или --vo=gpu-drm на Orange Pi
+            "--reset-on-next-file=all",      # критично для PDF и видео
+            "--vo=gpu",                      # или gpu-drm на Orange Pi
+            "--hwdec=auto"                   # аппаратное декодирование
         ]
 
         self.mpv_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -245,47 +246,43 @@ class MediaClient:
         print(f"▶️  Воспроизводим: {fid} ({ftype})")
 
         try:
+            # Всегда полностью останавливаем предыдущее воспроизведение
+            self._send_mpv_command(["stop"])
+            time.sleep(0.2)                     # важная пауза для сброса
+
             if ftype == "video":
-                # Полностью останавливаем предыдущее воспроизведение
-                self._send_mpv_command(["stop"])
-                time.sleep(0.15)                    # важная пауза для сброса состояния
-
                 self._send_mpv_command(["loadfile", local_path, "replace"])
-
-                # Ждём ровно заданную длительность (или длину видео)
-                if duration:
-                    time.sleep(duration)
-                else:
-                    # Если длительность не задана — ждём ~длину видео + запас
-                    time.sleep(30)                  # можно увеличить, если видео длинные
-
-                self._send_mpv_command(["stop"])    # гарантированно останавливаем
+                
+                play_duration = duration or 30   # запас на случай, если длительность не задана
+                time.sleep(play_duration)
+                self._send_mpv_command(["stop"])
 
             elif ftype == "image":
                 dur = duration or 5
-                self._send_mpv_command(["stop"])
-                time.sleep(0.1)
                 self._send_mpv_command(["loadfile", local_path, "replace"])
                 self._send_mpv_command(["set", "image-display-duration", str(dur)])
                 time.sleep(dur)
 
             elif ftype == "pdf":
-                self._send_mpv_command(["stop"])
-                time.sleep(0.1)
                 pages = playback.get("pdf_page_durations", [])
                 if not pages:
                     pages = [{"page": 1, "duration": 5}]
+
                 for p in pages:
                     page_path = self._get_pdf_page_path(fid, p["page"])
                     if page_path:
                         self._send_mpv_command(["loadfile", page_path, "replace"])
-                        time.sleep(p["duration"])
+                        time.sleep(p["duration"] + 0.1)   # небольшая доп. пауза
                     else:
+                        print(f"⚠️ Страница {p['page']} PDF не найдена")
                         time.sleep(p["duration"])
+
+                # После всех страниц PDF гарантированно останавливаем
+                self._send_mpv_command(["stop"])
 
         except Exception as e:
             print(f"❌ Ошибка воспроизведения {fid}: {e}")
-            self._start_mpv()   # перезапускаем mpv при критической ошибке
+            self._start_mpv()
 
     # ====================== ФОНОВЫЕ ЦИКЛЫ ======================
     def _heartbeat_loop(self):

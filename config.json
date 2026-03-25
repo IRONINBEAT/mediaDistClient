@@ -1,7 +1,8 @@
 {
   "server_url": "http://217.71.129.139:4085",
-  "device_id": "NSTU_OrangePI2302",
-  "token": "EbGbPKNRMs1jN0GBEwdTJBmdAbp7NMWzSWG0TQ-FN8wGN5Sawiis4-s1NelisRAq",
-  "heartbeat_interval": 30,
-  "check_videos_interval": 60
+    "device_id": "NSTU_OrangePI2302",
+    "token": "EbGbPKNRMs1jN0GBEwdTJBmdAbp7NMWzSWG0TQ-FN8wGN5Sawiis4-s1NelisRAq",
+    "media_dir": "./content",
+    "heartbeat_interval": 30,
+    "check_videos_interval": 60
 }

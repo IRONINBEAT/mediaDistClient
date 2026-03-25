@@ -239,13 +239,21 @@ class MediaClient:
         except Exception as e:
             print(f"❌ Ошибка воспроизведения {ftype} {fid}: {e}")
 
-    def _get_pdf_page_path(self, file_id: str, page_num: int) -> str | None:
+    def _get_pdf_page_path(self, file_id: str, page_num: int):
+        """Возвращает путь к странице PDF или None"""
         pages_dir = DOWNLOAD_DIR / f"{file_id}_pages"
         if not pages_dir.exists():
             return None
-        pngs = sorted(pages_dir.glob("*.png"), key=lambda p: int(''.join(filter(str.isdigit, p.stem.split('-')[-1])) or 0))
+        
+        pngs = sorted(
+            pages_dir.glob("*.png"),
+            key=lambda p: int(''.join(filter(str.isdigit, p.stem.split('-')[-1])) or 0)
+        )
+        
         idx = page_num - 1
-        return str(pngs[idx]) if 0 <= idx < len(pngs) else None
+        if 0 <= idx < len(pngs):
+            return str(pngs[idx])
+        return None
 
     # ====================== ФОНОВЫЕ ЦИКЛЫ ======================
     def _heartbeat_loop(self):

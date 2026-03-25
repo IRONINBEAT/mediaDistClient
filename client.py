@@ -7,7 +7,7 @@ from pathlib import Path
 import requests
 
 # ====================== НАСТРОЙКИ ======================
-DOWNLOAD_DIR = Path("media").resolve()          # абсолютный путь!
+DOWNLOAD_DIR = Path("media").resolve()
 CONFIG_FILE = Path("config.json")
 PLAYLIST_FILE = DOWNLOAD_DIR / "playlist.m3u"
 # ======================================================
@@ -16,7 +16,7 @@ class MediaClient:
     def __init__(self):
         self.config = self._load_config()
         self.current_playlist = []
-        self.local_files = {}                   # file_id -> абсолютный путь
+        self.local_files = {}
         self.device_status = "unknown"
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
@@ -42,8 +42,7 @@ class MediaClient:
         exit(0)
 
     def _save_config(self, cfg=None):
-        if cfg is None:
-            cfg = self.config
+        if cfg is None: cfg = self.config
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
 
@@ -57,7 +56,7 @@ class MediaClient:
             print(f"❌ API {endpoint}: {e}")
             return None
 
-    # ====================== MPV ======================
+    # ====================== MPV с DRM ======================
     def _start_mpv(self):
         if self.mpv_process and self.mpv_process.poll() is None:
             return
@@ -71,20 +70,21 @@ class MediaClient:
             "--osc=no",
             "--no-border",
             "--keep-open=always",
-            "--vo=gpu",           # попробуй потом --vo=xv или --vo=drm если не запустится
+            "--vo=drm",                    # ← главное изменение
+            "--gpu-context=drm",           # ← главное изменение
             "--hwdec=auto",
             "--really-quiet",
             "--log-file=mpv.log"
         ]
 
-        print("🚀 Запускаем mpv...")
+        print("🚀 Запускаем mpv с --vo=drm ...")
         try:
             self.mpv_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            time.sleep(1.5)
+            time.sleep(2.0)
             if self.mpv_process.poll() is None:
-                print("✅ mpv запущен")
+                print("✅ mpv запущен (DRM режим)")
             else:
-                print("❌ mpv упал. Смотри mpv.log")
+                print("❌ mpv упал сразу. Смотри mpv.log")
         except Exception as e:
             print(f"❌ Ошибка запуска mpv: {e}")
 
@@ -107,13 +107,13 @@ class MediaClient:
                 else:
                     f.write(f"#EXTINF:-1,{fid}\n")
 
-                f.write(f"{path}\n")          # теперь абсолютный путь!
+                f.write(f"{path}\n")
 
     def _rebuild_and_restart_mpv(self):
         self._rebuild_playlist()
         self._start_mpv()
 
-    # ====================== HEARTBEAT & CHECK ======================
+    # ====================== Остальные методы (без изменений) ======================
     def heartbeat(self):
         data = {"token": self.config["token"], "id": self.config["device_id"]}
         resp = self._api_post("/api/heartbeat", data)
@@ -181,16 +181,11 @@ class MediaClient:
                 f.write(chunk)
 
         if file_type == "pdf":
-            self._render_pdf_pages(str(local_path), file_id)
-
-        return str(local_path)                     # возвращаем абсолютный путь
-
-    def _render_pdf_pages(self, pdf_path, file_id):
-        # оставляем как было раньше (или можешь отключить пока)
-        pass
+            print(f"⚠️ PDF {file_id} — mpv не поддерживает PDF напрямую, пропускаем или конвертируем позже")
+        return str(local_path)
 
     def run(self):
-        print("🚀 Запуск клиента (исправленные пути)...")
+        print("🚀 Запуск клиента (DRM режим)...")
         self.heartbeat()
 
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
